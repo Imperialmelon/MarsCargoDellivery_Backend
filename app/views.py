@@ -9,7 +9,7 @@ from rest_framework import status
 from django.contrib.auth.models import User
 from rest_framework.decorators import api_view, permission_classes, authentication_classes, parser_classes
 from rest_framework.response import *
-from .serializers import ShippingSerializer,CargoSerializer,Shipping_CargosSerializer,ResolveShipping, UserSerializer, Shipping_with_info_Serializer,Adding_to_shippingSerializer
+from .serializers import ShippingSerializer,CargoSerializer,Shipping_CargosSerializer,ResolveShipping, UserSerializer, Shipping_with_info_Serializer,Adding_to_shippingSerializer, getCargoSerializer
 from django.core.files.uploadedfile import InMemoryUploadedFile
 import os.path
 from minio import Minio
@@ -27,6 +27,7 @@ from .auth import Auth_by_Session, AuthIfPos
 from .permissions import IsAuth, IsAuthManager
 
 
+
 SINGLE_USER = User(id=2, username='OAK')
 SINGLE_ADM = User(id=3, username='Admin1')
 
@@ -38,15 +39,15 @@ USER_ID = 6
                                            type=openapi.TYPE_STRING,
                                            description='cargo_name',
                                            in_=openapi.IN_QUERY),
+                                            openapi.Parameter('min_price',
+                                           type=openapi.TYPE_STRING,
+                                           description='min_price',
+                                           in_=openapi.IN_QUERY),
+
                      ],
                      responses={
-                         status.HTTP_200_OK: openapi.Schema(
-                             type=openapi.TYPE_OBJECT,
-                             properties={
-                                 'cargoes_list': openapi.Schema(type=openapi.TYPE_ARRAY,
-                                                            items=openapi.Schema(type=openapi.TYPE_OBJECT)),
-                             }
-                         ),
+                         status.HTTP_200_OK:getCargoSerializer,
+                         
                          status.HTTP_403_FORBIDDEN: "Forbidden",
                      })
 
@@ -73,24 +74,18 @@ def Get_CargoList(request):
         if req is not None:
              cargos_in_shipping = Shipping_Cargo.objects.filter(shipping_id=req.id).select_related('cargo').count() if req.id is not None else 0
     if filters is not None:
-        cargoes_list = Cargo.objects.filter(filters, title__istartswith=cargo_name, is_active=True).order_by('id')
+        cargoes_list = Cargo.objects.filter(filters, title__icontains=cargo_name, is_active=True).order_by('id')
     else:
-         cargoes_list = Cargo.objects.filter(title__istartswith=cargo_name, is_active=True).order_by('id')
-    serializer = CargoSerializer(cargoes_list, many=True)
-
+         cargoes_list = Cargo.objects.filter(title__icontains=cargo_name, is_active=True).order_by('id')
+    serializer = getCargoSerializer(
+        {
+            "cargo": CargoSerializer(cargoes_list, many=True).data,
+            "shipping_id": req.id if req else None,
+            "items_in_cart": cargos_in_shipping,
+        },
+    )
     
-    print(serializer.data)
-    # res = {
-    #     k : v for 
-    # }
-    # aboba = manyCargoesSerializer(cargoes_list, many=True)
-    cargoes_list = serializer.data
-    cargoes_list.append(f'shipping_id : {req.id if req is not None else 0}')
-    cargoes_list.append(f'cnt : {cargos_in_shipping}')
-    
-    return Response(
-        cargoes_list,
-
+    return Response( serializer.data, 
         status=status.HTTP_200_OK
     )
 
@@ -217,7 +212,7 @@ def CreateShipping(request, pk):
     if not shipping_cargo:
         cargo_shipping = Shipping_Cargo(shipping_id = shipping_id, cargo_id=pk, amount=1)
         cargo_shipping.save()
-    return Response('Succesfully added cargo to shipping')
+    return Response('Succesfully added cargo to shipping', status=status.HTTP_200_OK)
 
 
 def get_or_create_shipping(user_id):
@@ -305,6 +300,7 @@ def get_shippings_list(request):
         filters &= Q(formation_datetime__lte=parse(formation_datetime_end_filter))
     if not request.user.is_staff:
         filters &= Q(client=request.user)
+        filters &= ~Q(status=Shipping.RequestStatus.DRAFT)
     shippings = Shipping.objects.filter(filters).select_related("client")
     serializer = ShippingSerializer(shippings, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
@@ -512,7 +508,6 @@ def delete_cargo_from_shipping(request, ck, sk):
     cargo_id = cargo_in_shipping.cargo
     shipping = Shipping.objects.filter(id=sk).first()
     cargo = Cargo.objects.filter(id=ck).first()
-    shipping.total_price -= cargo_in_shipping.amount * cargo.price_per_ton
     shipping.save()
     return Response(status=status.HTTP_200_OK)
 
@@ -541,6 +536,7 @@ def change_shipping_cargo(request, ck, sk):
     cargo_in_shipping = Shipping_Cargo.objects.filter(cargo=ck, shipping=sk).first()
     if cargo_in_shipping is None:
         return Response("Cargo not found", status=status.HTTP_404_NOT_FOUND)
+    print(request.data)
     serializer = Shipping_CargosSerializer(cargo_in_shipping, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
@@ -596,8 +592,10 @@ def login_user(request):
     """
     username = request.POST.get('username')
     password = request.POST.get('password')
+
     print(username,password)
     user = authenticate(username=username, password=password)
+    print(user)
     if user is not None:
         session_id = str(uuid.uuid4())
         session_storage.set(session_id, username)
@@ -627,8 +625,11 @@ def logout_user(request):
 
     return Response(status=status.HTTP_403_FORBIDDEN)
 
+
+from .serializers import UpdateUserSerializer
+
 @swagger_auto_schema(method='put',
-                     request_body=UserSerializer,
+                     request_body=UpdateUserSerializer,
                      responses={
                          status.HTTP_200_OK: UserSerializer(),
                          status.HTTP_400_BAD_REQUEST: "Bad Request",
@@ -638,6 +639,7 @@ def logout_user(request):
 @permission_classes([IsAuth])
 @authentication_classes([Auth_by_Session])
 def update_user(request):
+    from django.contrib.auth.hashers import make_password
     """
     Обновление данных пользователя
     """
@@ -647,11 +649,42 @@ def update_user(request):
     #     serializer.save()
     #     return Response(serializer.data, status=status.HTTP_200_OK)
     # return Response('Failed to change user data', status=status.HTTP_400_BAD_REQUEST)
-
+    print(111111)
     serializer = UserSerializer(request.user, data=request.data, partial=True)
     print(request.user)
     if serializer.is_valid():
+        print('got here')
+        # user = serializer.save(commit=False)
+        
+        # Если пароль предоставлен, хешируем его
+        if 'password' in serializer.validated_data:
+            print(serializer.validated_data)
+            serializer.validated_data['password'] = make_password(serializer.validated_data['password'])
+
+
+        if 'username' in serializer.validated_data:
+            print('got it ')
+            session_id = request.COOKIES["session_id"]
+            if session_storage.exists(session_id):
+                print('too')
+                session_storage.delete(session_id)
+                user = request.user
+                session_storage.set(session_id, serializer.validated_data['username'])
+            
+
+        
         serializer.save()
+        # session_id = request.COOKIES["session_id"]
+        # if session_storage.exists(session_id):
+        #     session_storage.delete(session_id)
+        #     user = request.user
+        #     session_storage.set(session_id, user.username)
+
+        
+        # user.save()
+        # serializer.save()
+        user = request.user
+        print([user.username, user.password, user.email ])
         return Response(serializer.data, status=status.HTTP_200_OK)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 # def increase(request):

@@ -5,7 +5,6 @@ from .models import User
 class IsAuth(permissions.BasePermission):
     def has_permission(self, request, view):
         session_id = request.COOKIES['session_id']
-        print(session_id)
         if session_id is None:
             return False
         try:
