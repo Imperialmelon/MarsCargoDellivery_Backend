@@ -559,6 +559,8 @@ def create_user(request):
     """
     serializer = UserSerializer(data=request.data)
     if serializer.is_valid():
+        from django.contrib.auth.hashers import make_password
+        serializer.validated_data['password'] = make_password(serializer.validated_data['password'])
         serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response('Creation failed', status=status.HTTP_400_BAD_REQUEST)
